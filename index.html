@@ -372,6 +372,26 @@
     .result-win  { color: var(--win);  font-weight: 700; }
     .result-loss { color: var(--loss); font-weight: 700; }
 
+    /* Sortable column headers */
+    table.results th.sortable {
+      cursor: pointer;
+      user-select: none;
+      transition: color 0.15s;
+    }
+    table.results th.sortable:hover { color: var(--text); }
+    table.results th.sortable .sort-arrow {
+      display: inline-block;
+      margin-left: 3px;
+      font-size: 0.6rem;
+      opacity: 0.3;
+      vertical-align: middle;
+    }
+    table.results th.sort-asc  .sort-arrow,
+    table.results th.sort-desc .sort-arrow {
+      opacity: 1;
+      color: var(--accent);
+    }
+
     /* Empty / loading states */
     .empty-row td {
       padding: 48px 20px;
@@ -571,17 +591,17 @@
       <table class="results">
         <thead>
           <tr>
-            <th>Ticker</th>
-            <th>Score</th>
-            <th>Rating</th>
-            <th>Bias</th>
-            <th>Price</th>
-            <th>Stop ($)</th>
-            <th>Risk %</th>
-            <th>Vol Ratio</th>
-            <th>Short %</th>
-            <th>BB Width</th>
-            <th>5D Momo</th>
+            <th class="sortable" data-key="ticker">Ticker <span class="sort-arrow">⇅</span></th>
+            <th class="sortable" data-key="score">Score <span class="sort-arrow">⇅</span></th>
+            <th class="sortable" data-key="rating">Rating <span class="sort-arrow">⇅</span></th>
+            <th class="sortable" data-key="bias">Bias <span class="sort-arrow">⇅</span></th>
+            <th class="sortable" data-key="price">Price <span class="sort-arrow">⇅</span></th>
+            <th class="sortable" data-key="stop_loss">Stop ($) <span class="sort-arrow">⇅</span></th>
+            <th class="sortable" data-key="stop_pct">Risk % <span class="sort-arrow">⇅</span></th>
+            <th class="sortable" data-key="vol_ratio">Vol Ratio <span class="sort-arrow">⇅</span></th>
+            <th class="sortable" data-key="short_pct">Short % <span class="sort-arrow">⇅</span></th>
+            <th class="sortable" data-key="bb_width">BB Width <span class="sort-arrow">⇅</span></th>
+            <th class="sortable" data-key="momentum_5d">5D Momo <span class="sort-arrow">⇅</span></th>
           </tr>
         </thead>
         <tbody id="results-body">
@@ -603,16 +623,31 @@
 </footer>
 
 <script>
-  const DATA_URL      = './data/latest.json';
-  const REFRESH_SEC   = 60;
+  const DATA_URL    = './data/latest.json';
+  const REFRESH_SEC = 60;
 
-  let countdown    = REFRESH_SEC;
-  let countdownId  = null;
-  let lastFetchOk  = false;
+  let countdown   = REFRESH_SEC;
+  let lastFetchOk = false;
+  let currentData = [];
+  let sortState   = { key: null, dir: 1 };  // dir: 1=asc, -1=desc
+
+  // Heat-colour tiers for Vol Ratio and Short %
+  const VOL_TIERS = [
+    { min: 0,   color: 'inherit' },
+    { min: 1.5, color: '#eab308' },
+    { min: 3,   color: '#f97316' },
+    { min: 5,   color: '#ef4444' },
+  ];
+  const SHORT_TIERS = [
+    { min: 0,  color: 'inherit' },
+    { min: 15, color: '#eab308' },
+    { min: 25, color: '#f97316' },
+    { min: 40, color: '#ef4444' },
+  ];
 
   // ── Fetch & render ──────────────────────────────────────
   async function fetchData() {
-    const url = `${DATA_URL}?t=${Date.now()}`;   // cache-bust
+    const url = `${DATA_URL}?t=${Date.now()}`;
     try {
       const res  = await fetch(url);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -631,44 +666,52 @@
   function render(data) {
     const results = data.results || [];
 
-    // Header meta
-    setText('scan-label',       data.scan_label    || '—');
-    setText('last-updated',     data.updated       || '—');
-    setText('tickers-scanned',  data.total_scanned || '—');
-    setText('min-score',        data.min_score     || '—');
+    setText('scan-label',      data.scan_label    || '—');
+    setText('last-updated',    data.updated       || '—');
+    setText('tickers-scanned', data.total_scanned || '—');
+    setText('min-score',       data.min_score     || '—');
 
-    // Stat cards
     const highCount = results.filter(r => r.score >= 80).length;
     const longCount = results.filter(r => r.bias  === 'LONG').length;
     setText('stat-setups', results.length);
     setText('stat-high',   highCount);
     setText('stat-long',   results.length ? `${longCount}/${results.length}` : '—');
 
-    // Backtest
     renderBacktest(data.backtest);
-
-    // Main table
     renderTable(results);
   }
 
+  // ── Main results table ──────────────────────────────────
   function renderTable(results) {
+    currentData = results;
+    renderSorted();
+  }
+
+  function renderSorted() {
     const tbody = document.getElementById('results-body');
-    if (!results.length) {
-      tbody.innerHTML = `<tr class="empty-row"><td colspan="9">No setups above minimum score in this scan.</td></tr>`;
+    const rows  = sortCurrentData();
+
+    if (!rows.length) {
+      tbody.innerHTML = `<tr class="empty-row"><td colspan="11">No setups above minimum score in this scan.</td></tr>`;
+      updateSortArrows();
       return;
     }
 
-    tbody.innerHTML = results.map(r => {
-      const scoreClass  = r.score >= 80 ? 'high' : (r.score >= 60 ? 'medium' : 'watch');
-      const biasClass   = r.bias === 'LONG' ? 'long' : 'short';
-      const momoClass   = r.momentum_5d > 0 ? 'positive' : (r.momentum_5d < 0 ? 'negative' : 'neutral');
-      const momoSign    = r.momentum_5d > 0 ? '+' : '';
+    tbody.innerHTML = rows.map(r => {
+      const scoreClass = r.score >= 80 ? 'high' : (r.score >= 60 ? 'medium' : 'watch');
+      const biasClass  = r.bias === 'LONG' ? 'long' : 'short';
+      const momoClass  = r.momentum_5d > 0 ? 'positive' : (r.momentum_5d < 0 ? 'negative' : 'neutral');
+      const momoSign   = r.momentum_5d > 0 ? '+' : '';
+      const volColor   = heatColor(r.vol_ratio, VOL_TIERS);
+      const shortColor = heatColor(r.short_pct, SHORT_TIERS);
+      const volBold    = r.vol_ratio >= 1.5 ? '700' : 'inherit';
+      const shortBold  = r.short_pct >= 15  ? '700' : 'inherit';
 
       return `
         <tr>
           <td data-label="Ticker">${escHtml(r.ticker)}</td>
           <td data-label="Score">
-            <span class="score-badge ${scoreClass}">${r.score}/100</span>
+            <span class="score-badge ${scoreClass}">${r.score}/110</span>
           </td>
           <td data-label="Rating">
             <span class="rating ${scoreClass}">${escHtml(r.rating)}</span>
@@ -679,14 +722,53 @@
           <td data-label="Price">$${fmt(r.price)}</td>
           <td data-label="Stop ($)" style="color:var(--loss);font-weight:700;">$${fmt(r.stop_loss)}</td>
           <td data-label="Risk %" style="color:var(--amber);">${fmt(r.stop_pct)}%</td>
-          <td data-label="Vol Ratio">${fmt(r.vol_ratio)}x</td>
-          <td data-label="Short %">${fmt(r.short_pct)}%</td>
+          <td data-label="Vol Ratio" style="color:${volColor};font-weight:${volBold};">${fmt(r.vol_ratio)}x</td>
+          <td data-label="Short %" style="color:${shortColor};font-weight:${shortBold};">${fmt(r.short_pct)}%</td>
           <td data-label="BB Width">${fmt(r.bb_width)}%</td>
           <td data-label="5D Momo" class="${momoClass}">${momoSign}${fmt(r.momentum_5d)}%</td>
         </tr>`;
     }).join('');
+
+    updateSortArrows();
   }
 
+  // ── Sort logic ──────────────────────────────────────────
+  function sortCurrentData() {
+    if (!sortState.key) return currentData.slice();
+    const STRING_KEYS = new Set(['ticker', 'bias', 'rating']);
+    return currentData.slice().sort((a, b) => {
+      const av = a[sortState.key], bv = b[sortState.key];
+      const cmp = STRING_KEYS.has(sortState.key)
+        ? String(av).localeCompare(String(bv))
+        : (parseFloat(av) || 0) - (parseFloat(bv) || 0);
+      return cmp * sortState.dir;
+    });
+  }
+
+  function updateSortArrows() {
+    document.querySelectorAll('table.results th.sortable').forEach(th => {
+      const arrow  = th.querySelector('.sort-arrow');
+      if (!arrow) return;
+      const active = th.dataset.key === sortState.key;
+      th.classList.toggle('sort-asc',  active && sortState.dir ===  1);
+      th.classList.toggle('sort-desc', active && sortState.dir === -1);
+      arrow.textContent = active ? (sortState.dir === 1 ? '▲' : '▼') : '⇅';
+    });
+  }
+
+  function initSortHeaders() {
+    document.querySelectorAll('table.results th.sortable').forEach(th => {
+      th.addEventListener('click', () => {
+        const key = th.dataset.key;
+        sortState = (sortState.key === key)
+          ? { key, dir: sortState.dir * -1 }
+          : { key, dir: 1 };
+        renderSorted();
+      });
+    });
+  }
+
+  // ── Backtest panel ──────────────────────────────────────
   function renderBacktest(bt) {
     const panel = document.getElementById('backtest-panel');
     if (!bt || !bt.total) {
@@ -697,26 +779,24 @@
 
     panel.style.display = 'block';
 
-    const wr        = bt.win_rate;
-    const wrClass   = wr >= 60 ? 'green' : (wr >= 40 ? 'amber' : 'red');
-    const wrColor   = wr >= 60 ? 'var(--win)' : (wr >= 40 ? 'var(--amber)' : 'var(--loss)');
+    const wr      = bt.win_rate;
+    const wrClass = wr >= 60 ? 'green' : (wr >= 40 ? 'amber' : 'red');
+    const wrColor = wr >= 60 ? 'var(--win)' : (wr >= 40 ? 'var(--amber)' : 'var(--loss)');
 
-    setText('stat-winrate',         `${wr}%`);
+    setText('stat-winrate', `${wr}%`);
     document.getElementById('stat-winrate').style.color = wrColor;
 
-    const display = document.getElementById('bt-winrate-display');
-    display.textContent  = `${wr}%`;
-    display.className    = `bt-winrate ${wrClass}`;
+    const display     = document.getElementById('bt-winrate-display');
+    display.textContent = `${wr}%`;
+    display.className   = `bt-winrate ${wrClass}`;
 
     setText('bt-wl',   `${bt.wins}W / ${bt.losses}L of ${bt.total} picks`);
     setText('bt-meta', `${bt.total} picks evaluated · Win threshold ±2%`);
 
-    const picks = bt.picks || [];
-    document.getElementById('bt-body').innerHTML = picks.map(o => {
+    document.getElementById('bt-body').innerHTML = (bt.picks || []).map(o => {
       const chgClass = o.pct_change >= 0 ? 'positive' : 'negative';
       const chgSign  = o.pct_change > 0 ? '+' : '';
       const resClass = o.win ? 'result-win' : 'result-loss';
-      const resLabel = o.win ? 'WIN' : 'LOSS';
       return `
         <tr>
           <td>${escHtml(o.ticker)}</td>
@@ -724,7 +804,7 @@
           <td>$${fmt(o.entry_price)}</td>
           <td>$${fmt(o.current_price)}</td>
           <td class="${chgClass}">${chgSign}${fmt(o.pct_change)}%</td>
-          <td class="${resClass}">${resLabel}</td>
+          <td class="${o.win ? 'result-win' : 'result-loss'}">${o.win ? 'WIN' : 'LOSS'}</td>
         </tr>`;
     }).join('');
   }
@@ -734,7 +814,7 @@
     const dot    = document.getElementById('live-dot');
     const status = document.getElementById('fetch-status');
     dot.className    = `live-dot ${state === 'ok' ? '' : state}`;
-    status.className = `${state === 'ok' ? 'ok' : (state === 'stale' ? 'stale' : 'error')}`;
+    status.className = state === 'ok' ? 'ok' : (state === 'stale' ? 'stale' : 'error');
     status.textContent = msg;
   }
 
@@ -745,11 +825,7 @@
   }
 
   function tickCountdown() {
-    countdown--;
-    if (countdown <= 0) {
-      countdown = REFRESH_SEC;
-      fetchData();
-    }
+    if (--countdown <= 0) { countdown = REFRESH_SEC; fetchData(); }
     setText('counter', countdown);
   }
 
@@ -767,13 +843,20 @@
 
   function escHtml(s) {
     return String(s)
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;');
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  function heatColor(v, tiers) {
+    let color = 'inherit';
+    for (const t of tiers) {
+      if (parseFloat(v) >= t.min) color = t.color;
+    }
+    return color;
   }
 
   // ── Boot ────────────────────────────────────────────────
+  initSortHeaders();
   fetchData();
   setInterval(tickCountdown, 1000);
 </script>
